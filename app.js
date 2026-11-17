@@ -14,7 +14,7 @@
   const DEMO = !IN_TG; // открыто в обычном браузере → демо-данные, ничего не сохраняется
 
   const QUADS = {
-    1: { short: 'Срочно·важно', long: 'Срочно и важно', hint: 'Сделать сейчас' },
+    1: { short: 'Срочно и важно', long: 'Срочно и важно', hint: 'Сделать сейчас' },
     2: { short: 'Важно', long: 'Важно, не срочно', hint: 'Запланировать' },
     3: { short: 'Срочно', long: 'Срочно, не важно', hint: 'Быстро закрыть' },
     4: { short: 'Потом', long: 'Не срочно, не важно', hint: 'Когда-нибудь' },
@@ -45,6 +45,8 @@
     fatal: null,
     triage: null, // очередь id при разборе инбокса
   };
+
+  let heroWeight = null, lastHeroWeight = null, todayOpen = null, dayJustCleared = false; // счётчик «Сегодня»
 
   const $ = (sel, root = document) => root.querySelector(sel);
   const view = $('#view');
@@ -151,7 +153,113 @@
     }
   }
 
+  // ---------------------------------------------------------------
+  // Иконки (один штрих, одна толщина — вместо эмодзи и символов)
+  // ---------------------------------------------------------------
+  const ICONS = {
+    check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
+    repeat: '<path d="M17 2l3 3-3 3"/><path d="M4 11V9a4 4 0 0 1 4-4h12"/><path d="M7 22l-3-3 3-3"/><path d="M20 13v2a4 4 0 0 1-4 4H4"/>',
+    note: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/>',
+    clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    timer: '<circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2M10 2h4"/>',
+    subs: '<path d="M3.5 6l1.5 1.5L7.5 5M3.5 13l1.5 1.5L7.5 12M11 6h9M11 13h9M11 19h9"/>',
+    forward: '<path d="M15 14l5-5-5-5"/><path d="M4 20v-7a4 4 0 0 1 4-4h12"/>',
+    send: '<path d="M21 3 10 14"/><path d="M21 3l-7 18-4-7-7-4z"/>',
+    up: '<path d="M12 19V5M5 12l7-7 7 7"/>',
+    archive: '<rect x="3" y="4" width="18" height="5" rx="1.5"/><path d="M5 9v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9M10 13h4"/>',
+    x: '<path d="M18 6 6 18M6 6l12 12"/>',
+    left: '<path d="M15 18l-6-6 6-6"/>',
+    right: '<path d="M9 18l6-6-6-6"/>',
+    trash: '<path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/>',
+    ext: '<path d="M7 17 17 7M8 7h9v9"/>',
+    sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M4.6 4.6l1.4 1.4M18 18l1.4 1.4M2.5 12h2M19.5 12h2M4.6 19.4 6 18M18 6l1.4-1.4"/>',
+    inbox: '<path d="M3 13h5l1.5 2.5h5L16 13h5"/><path d="M5.2 5.6 3 13v5a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-5l-2.2-7.4A2 2 0 0 0 16.9 4H7.1a2 2 0 0 0-1.9 1.6z"/>',
+    search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
+    chart: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
+    snow: '<path d="M12 2v20M3.3 7l17.4 10M3.3 17 20.7 7M9 3.5l3 2 3-2M9 20.5l3-2 3 2"/>',
+    spark: '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 15l.7 1.8 1.8.7-1.8.7L19 20l-.7-1.8-1.8-.7 1.8-.7z"/>',
+    bolt: '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>',
+    plus: '<path d="M12 5v14M5 12h14"/>',
+    sound: '<path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14"/>',
+  };
+  const ic = (name, cls) => '<svg class="' + (cls || 'ico') + '" viewBox="0 0 24 24" aria-hidden="true">' + (ICONS[name] || '') + '</svg>';
+
+  // ---------------------------------------------------------------
+  // Звуки: тихие синтезированные сигналы (Web Audio, без файлов).
+  // Выключаются в настройках; выбор хранится на устройстве.
+  // ---------------------------------------------------------------
+  const SND = (() => {
+    let ctx = null, out = null;
+    let on = true;
+    try { on = JSON.parse(localStorage.getItem('tm_sound')) !== false; } catch (e) { /* нет доступа */ }
+
+    function audio() {
+      if (!ctx) {
+        const C = window.AudioContext || window.webkitAudioContext;
+        if (!C) return null;
+        ctx = new C();
+        out = ctx.createGain();
+        out.gain.value = 0.55;
+        const comp = ctx.createDynamicsCompressor();
+        out.connect(comp);
+        comp.connect(ctx.destination);
+      }
+      if (ctx.state === 'suspended') ctx.resume();
+      return ctx;
+    }
+
+    function tone(freq, t0, dur, o = {}) {
+      const osc = ctx.createOscillator(), g = ctx.createGain();
+      osc.type = o.type || 'sine';
+      osc.frequency.setValueAtTime(freq, t0);
+      if (o.to) osc.frequency.exponentialRampToValueAtTime(o.to, t0 + dur);
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(o.gain || 0.1, t0 + (o.attack || 0.005));
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      osc.connect(g);
+      g.connect(out);
+      osc.start(t0);
+      osc.stop(t0 + dur + 0.03);
+    }
+
+    const PATCHES = {
+      select: t => tone(1700, t, 0.04, { type: 'triangle', gain: 0.03 }),
+      light: t => tone(540, t, 0.1, { gain: 0.08, to: 860 }),
+      success: t => {
+        tone(659.25, t, 0.18, { type: 'triangle', gain: 0.09 });
+        tone(987.77, t + 0.075, 0.3, { gain: 0.085 });
+        tone(1975.5, t + 0.075, 0.14, { gain: 0.012 });
+      },
+      warning: t => tone(280, t, 0.18, { gain: 0.11, to: 140 }),
+      error: t => { tone(233, t, 0.12, { type: 'square', gain: 0.025 }); tone(196, t + 0.11, 0.18, { type: 'square', gain: 0.025 }); },
+      undo: t => tone(860, t, 0.12, { gain: 0.07, to: 470 }),
+      fanfare: t => [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => {
+        tone(f, t + i * 0.08, 0.38, { type: 'triangle', gain: 0.07 });
+        tone(f * 2, t + i * 0.08, 0.2, { gain: 0.012 });
+      }),
+    };
+
+    return {
+      get on() { return on; },
+      set(v) {
+        on = !!v;
+        try { localStorage.setItem('tm_sound', JSON.stringify(on)); } catch (e) { /* нет доступа */ }
+      },
+      play(name, delay) {
+        if (!on || !PATCHES[name]) return;
+        try {
+          const c = audio();
+          if (c) PATCHES[name](c.currentTime + 0.01 + (delay || 0));
+        } catch (e) { /* звук недоступен */ }
+      },
+    };
+  })();
+
   function hap(kind) {
+    SND.play(kind || 'light');
+    // Аккорд только когда последняя задача дня именно выполнена (не перенесена и не удалена)
+    if (kind === 'success' && dayJustCleared) SND.play('fanfare', 0.32);
+    dayJustCleared = false;
     try {
       const h = tg && tg.HapticFeedback;
       if (!h) return;
@@ -388,15 +496,17 @@
     if (o.showQuad !== false && t.quadrant && !isDone) meta.push('<span class="qtag q' + t.quadrant + '">' + QUADS[t.quadrant].short + '</span>');
     if (p) meta.push(projTag(p));
     if (o.showDate && t.due_date) meta.push('<span class="' + (overdue ? 'red' : '') + '">' + esc(shortDate(t.due_date)) + '</span>');
-    if (t.due_time) meta.push('<span>' + esc(t.due_time) + '</span>');
-    if (subs.length) meta.push('<span>☑ ' + subs.filter(s => s.done).length + '/' + subs.length + '</span>');
-    if (t.repeat && t.repeat.type) meta.push('<span title="Повторяется">↻</span>');
-    if (t.note) meta.push('<span title="Есть заметка">✎</span>');
-    if (isDone && t.spent_min) meta.push('<span>⏱ ' + fmtMin(t.spent_min) + '</span>');
-    if (o.showAge) meta.push('<span class="muted">' + (t.source === 'forward' ? '↪ ' : t.source === 'bot' ? '✈ ' : '') + ago(t.created_at) + '</span>');
+    if (t.due_time) meta.push('<span>' + ic('clock') + esc(t.due_time) + '</span>');
+    if (subs.length) meta.push('<span>' + ic('subs') + subs.filter(s => s.done).length + '/' + subs.length + '</span>');
+    if (t.repeat && t.repeat.type) meta.push('<span title="Повторяется" aria-label="Повторяется">' + ic('repeat') + '</span>');
+    if (t.note) meta.push('<span title="Есть заметка" aria-label="Есть заметка">' + ic('note') + '</span>');
+    if (isDone && t.spent_min) meta.push('<span>' + ic('timer') + fmtMin(t.spent_min) + '</span>');
+    if (o.showAge) meta.push('<span class="muted">' + (t.source === 'forward' ? ic('forward') : t.source === 'bot' ? ic('send') : '') + ago(t.created_at) + '</span>');
     if (o.showPostponed && t.postpone_count) meta.push('<span class="red">перенос ×' + t.postpone_count + '</span>');
+    const isNow = !isDone && o.nowId && o.nowId === t.id;
+    if (isNow) meta.unshift('<span class="now-label">' + ic('bolt') + 'Следующая</span>');
 
-    return '<div class="task' + (isDone ? ' done' : '') + '" data-id="' + esc(t.id) + '">' +
+    return '<div class="task p' + (isDone ? 0 : (t.quadrant || 0)) + (isDone ? ' done' : '') + (isNow ? ' now' : '') + '" data-id="' + esc(t.id) + '">' +
       '<button class="check q' + (t.quadrant || 0) + '" data-act="toggle" aria-label="' + (isDone ? 'Вернуть' : 'Выполнено') + '"></button>' +
       '<div class="task-main" data-act="open">' +
       '<div class="task-title">' + esc(t.title || 'Без названия') + '</div>' +
@@ -412,7 +522,7 @@
   }
 
   function empty(icon, title, text, btn) {
-    return '<div class="empty"><div class="empty-icon">' + icon + '</div><h3>' + title + '</h3>' +
+    return '<div class="empty"><div class="empty-icon">' + ic(icon, '') + '</div><h3>' + title + '</h3>' +
       (text ? '<p>' + text + '</p>' : '') + (btn || '') + '</div>';
   }
 
@@ -431,29 +541,41 @@
     const pct = total ? Math.round(doneToday.length / total * 100) : 0;
     const minutes = doneToday.reduce((s, t) => s + (t.spent_min || 0), 0);
 
+    // Счётчик набирает жирность вместе с прогрессом дня: 200 → 900
+    heroWeight = Math.round(200 + pct * 7);
+    todayOpen = open.length;
+    const segs = Math.min(total, 24);
+    const doneSegs = total ? Math.round(doneToday.length / total * segs) : 0;
+
     let h = '<div class="hero">' +
-      '<div class="hero-date">' + esc(longDate(td)) + '</div>' +
-      '<div class="hero-row"><div class="hero-num">' + doneToday.length + '<small> / ' + total + '</small></div>' +
-      '<div class="hero-label">' + (total ? 'сделано' + (minutes ? ' · ' + fmtMin(minutes) : '') : 'на сегодня пусто') + '</div></div>' +
-      '<div class="progress"><i style="width:' + pct + '%"></i></div></div>';
+      '<div class="hero-date"><span>' + esc(longDate(td)) + '</span>' +
+      (minutes ? '<span><b>' + fmtMin(minutes) + '</b> в работе</span>' : '') + '</div>' +
+      '<div class="hero-row"><div class="hero-num" aria-label="Сделано ' + doneToday.length + ' из ' + total + '">' + doneToday.length + '<small>/' + total + '</small></div>' +
+      '<div class="hero-label">' + (total ? (open.length ? 'осталось ' + open.length : 'всё закрыто') : 'на сегодня пусто') + '</div></div>' +
+      (segs ? '<div class="progress">' + Array.from({ length: segs }, (_, i) => '<i style="--i:' + i + '"' + (i < doneSegs ? ' class="on"' : '') + '></i>').join('') + '</div>' : '') +
+      '</div>';
 
     if (!open.length) {
       h += doneToday.length
-        ? empty('🎉', 'Всё на сегодня сделано', 'Можно выдохнуть. Или взять что-то из списка.')
-        : empty('☀️', 'На сегодня задач нет', inboxN ? 'В инбоксе ' + inboxN + ' ' + plural(inboxN, 'задача', 'задачи', 'задач') + ' — раскидай их по дням.' : 'Добавь задачу кнопкой + или напиши боту.',
+        ? empty('spark', 'Всё на сегодня сделано', 'Можно выдохнуть. Или взять что-то из списка.')
+        : empty('sun', 'На сегодня задач нет', inboxN ? 'В инбоксе ' + inboxN + ' ' + plural(inboxN, 'задача', 'задачи', 'задач') + ' — раскидай их по дням.' : 'Добавь задачу кнопкой + или напиши боту.',
           inboxN ? '<button class="btn primary" data-act="goto" data-tab="inbox">Разобрать инбокс</button>' : '');
     }
 
-    h += section('Просрочено', overdue, { showDate: true, cls: 'overdue' });
-    [1, 2, 3, 4, 0].forEach(q => {
+    const order = [1, 2, 3, 4, 0];
+    const first = overdue[0] || order.map(q => todays.filter(t => (t.quadrant || 0) === q)).flat()[0];
+    const nowId = first && first.id;
+
+    h += section('Просрочено', overdue, { showDate: true, cls: 'overdue', nowId });
+    order.forEach(q => {
       const list = todays.filter(t => (t.quadrant || 0) === q);
       if (!list.length) return;
       const title = q ? QUADS[q].long : 'Без приоритета';
-      h += section(title, list, { showQuad: false, cls: 'q-group q' + q });
+      h += section(title, list, { showQuad: false, cls: 'q-group q' + q, nowId });
     });
 
     if (doneToday.length) {
-      h += '<details class="group done-group"><summary><h2>Сделано сегодня <span class="count">' + doneToday.length + '</span></h2></summary>' +
+      h += '<details class="group done-group"><summary><h2>Сделано сегодня <span class="count">' + doneToday.length + '</span>' + ic('right', 'chev') + '</h2></summary>' +
         '<div class="card">' + doneToday.map(t => taskRow(t)).join('') + '</div></details>';
     }
     return h;
@@ -466,11 +588,11 @@
     const items = S.tasks.filter(t => t.status === 'inbox')
       .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
     if (!items.length) {
-      return empty('📥', 'Инбокс пуст', 'Пиши или пересылай задачи боту в течение дня — вечером они будут ждать здесь.');
+      return empty('inbox', 'Инбокс пуст', 'Пиши или пересылай задачи боту в течение дня — вечером они будут ждать здесь.');
     }
-    return '<div class="inbox-head"><p>' + items.length + ' ' + plural(items.length, 'задача ждёт', 'задачи ждут', 'задач ждут') + ' разбора</p>' +
-      '<button class="btn primary" data-act="triage-all">Разобрать по очереди</button></div>' +
-      '<div class="card">' + items.map(t => taskRow(t, { showAge: true, showDate: true })).join('') + '</div>';
+    return '<div class="inbox-head"><p><b style="--iw:' + Math.min(900, 260 + items.length * 70) + '">' + items.length + '</b>' + plural(items.length, 'задача ждёт', 'задачи ждут', 'задач ждут') + ' разбора</p>' +
+      '<button class="btn primary" data-act="triage-all">Разобрать по очереди ' + ic('right') + '</button></div>' +
+      '<div class="card inbox-list">' + items.map(t => taskRow(t, { showAge: true, showDate: true })).join('') + '</div>';
   }
 
   // ---------------------------------------------------------------
@@ -485,7 +607,7 @@
         return '<button class="chip' + (S.filter === id ? ' on' : '') + '" data-act="filter" data-pid="' + esc(id) + '">' +
           (p ? '<i class="dot" style="--c:' + esc(p.color) + '"></i>' : '') + esc(name) + '</button>';
       }).join('') + '</div>' +
-      '<label class="switch-row"><input type="checkbox" id="show-done"' + (S.showDone ? ' checked' : '') + '> Показывать выполненные</label>' +
+      '<label class="switch-row"><span>Показывать выполненные</span><input type="checkbox" id="show-done"' + (S.showDone ? ' checked' : '') + '></label>' +
       '</div><div id="all-list">' + allList() + '</div>';
   }
 
@@ -515,7 +637,7 @@
         .sort((a, b) => (b.done_at || '').localeCompare(a.done_at || '')).slice(0, 100);
       h += section('Выполнено', done);
     }
-    return h || empty('🔍', 'Ничего не нашлось', q ? 'Попробуй другой запрос.' : 'Здесь пока пусто.');
+    return h || empty('search', 'Ничего не нашлось', q ? 'Попробуй другой запрос.' : 'Здесь пока пусто.');
   }
 
   // ---------------------------------------------------------------
@@ -549,14 +671,30 @@
     const isCurrent = S.weekOffset === 0;
 
     let h = '<div class="week-nav">' +
-      '<button class="icon-btn" data-act="week-prev" aria-label="Прошлая неделя"' + (S.weekOffset <= -15 ? ' disabled' : '') + '>‹</button>' +
+      '<button class="icon-btn" data-act="week-prev" aria-label="Прошлая неделя"' + (S.weekOffset <= -15 ? ' disabled' : '') + '>' + ic('left', '') + '</button>' +
       '<div><b>' + rangeLabel(cur.mon, cur.sun) + '</b><span>' + (isCurrent ? 'эта неделя' : S.weekOffset === -1 ? 'прошлая неделя' : '') + '</span></div>' +
-      '<button class="icon-btn" data-act="week-next" aria-label="Следующая неделя"' + (isCurrent ? ' disabled' : '') + '>›</button></div>';
+      '<button class="icon-btn" data-act="week-next" aria-label="Следующая неделя"' + (isCurrent ? ' disabled' : '') + '>' + ic('right', '') + '</button></div>';
 
     h += '<div class="stats">' +
       '<div class="stat"><span>Закрыто</span><b>' + cur.done.length + '</b>' + deltaBadge(cur.done.length - prev.done.length) + '</div>' +
       '<div class="stat"><span>Время</span><b>' + (cur.minutes ? fmtMin(cur.minutes) : '—') + '</b>' + deltaBadge(cur.minutes - prev.minutes, true) + '</div>' +
       '</div>';
+
+    // Семь дней в одном масштабе: высота столбика — минуты (или число задач, если время не указано)
+    const td0 = today();
+    const perDay = Array.from({ length: 7 }, (_, i) => {
+      const d = addDays(cur.mon, i);
+      const list = cur.done.filter(t => isoDay(t.done_at) === d);
+      return { d, n: list.length, m: list.reduce((s, t) => s + (t.spent_min || 0), 0) };
+    });
+    const useMin = perDay.some(x => x.m);
+    const peak = Math.max(1, ...perDay.map(x => useMin ? x.m : x.n));
+    h += '<div class="days" aria-label="По дням">' + perDay.map(x => {
+      const v = useMin ? x.m : x.n;
+      return '<div class="day' + (x.d === td0 ? ' today' : '') + '"><div class="day-bar"><i style="--h:' + (v ? Math.max(6, v / peak * 100) : 0) + '%"></i></div>' +
+        '<em>' + (v ? (useMin ? (x.m >= 60 ? String(Math.round(x.m / 6) / 10).replace('.', ',') + ' ч' : x.m + ' мин') : x.n) : '') + '</em>' +
+        '<small>' + WD_SHORT[parseD(x.d).getDay()] + '</small></div>';
+    }).join('') + '</div>';
 
     const keys = Object.keys(cur.by).sort((a, b) => cur.by[b].m - cur.by[a].m || cur.by[b].n - cur.by[a].n);
     if (keys.length) {
@@ -575,7 +713,7 @@
           '<div class="bar-tasks">' + b.tasks.sort((x, y) => (y.spent_min || 0) - (x.spent_min || 0)).map(t => taskRow(t)).join('') + '</div></details>';
       }).join('') + '</div></section>';
     } else {
-      h += empty('📊', 'За эту неделю пока ничего не закрыто', isCurrent ? 'Закрывай задачи и указывай время — здесь появится картина по проектам.' : '');
+      h += empty('chart', 'За эту неделю пока ничего не закрыто', isCurrent ? 'Закрывай задачи и указывай время — здесь появится картина по проектам.' : '');
     }
 
     if (isCurrent) {
@@ -585,7 +723,7 @@
       const postponed = open.filter(t => (t.postpone_count || 0) >= 2 && !(t.due_date && t.due_date < td));
       const stale = open.filter(t => t.status === 'inbox' && t.created_at && Date.now() - new Date(t.created_at).getTime() > 3 * 864e5);
       if (overdue.length || postponed.length || stale.length) {
-        h += '<div class="stuck-title">🧊 Зависло</div>';
+        h += '<div class="stuck-title">' + ic('snow', '') + 'Зависло</div>';
         h += section('Просрочено', overdue, { showDate: true, showPostponed: true, cls: 'overdue' });
         h += section('Переносил 2+ раза', postponed, { showDate: true, showPostponed: true });
         h += section('В инбоксе дольше 3 дней', stale, { showAge: true });
@@ -612,14 +750,30 @@
     }
     const scroll = window.scrollY;
     const searchFocused = document.activeElement && document.activeElement.id === 'search';
+    const prevOpen = todayOpen;
+    dayJustCleared = false;
     view.innerHTML = { today: viewToday, inbox: viewInbox, all: viewAll, week: viewWeek }[S.tab]();
     window.scrollTo(0, scroll);
+
+    // Подпись мира: счётчик плавно «набирает вес» от прошлого значения к новому
+    const num = view.querySelector('.hero-num');
+    if (num && heroWeight != null) {
+      num.style.fontWeight = lastHeroWeight == null ? heroWeight : lastHeroWeight;
+      if (lastHeroWeight != null && lastHeroWeight !== heroWeight) {
+        void num.offsetWidth;
+        requestAnimationFrame(() => { num.style.fontWeight = heroWeight; });
+      }
+      lastHeroWeight = heroWeight;
+      // Закрыта последняя задача дня — маленький праздник
+      dayJustCleared = prevOpen > 0 && todayOpen === 0;
+    }
     if (searchFocused) { const s = $('#search'); s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
   }
 
   function setTab(tab) {
     if (S.tab === tab) return;
     S.tab = tab;
+    todayOpen = null;
     hap('select');
     window.scrollTo(0, 0);
     render();
@@ -724,9 +878,9 @@
         : '<button class="btn primary" data-ed="done">Выполнено ✓</button>';
 
     const el = openSheet(
-      '<div class="ed-head"><span class="kicker">' + (isInbox ? 'Инбокс' + (triage ? ' · разбор' : '') : isDone ? 'Выполнено' : 'Задача') + '</span>' +
-      '<button class="icon-btn del" data-ed="delete" aria-label="Удалить">' +
-      '<svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg></button></div>' +
+      '<div class="ed-head"><span class="ed-state' + (isDone ? ' done' : '') + '">' +
+      (isInbox ? ic('inbox') + 'Инбокс' + (triage ? ' · разбор' : '') : isDone ? ic('check') + 'Выполнено' : ic('sun') + 'В работе') + '</span>' +
+      '<button class="icon-btn del" data-ed="delete" aria-label="Удалить">' + ic('trash', '') + '</button></div>' +
       '<textarea class="ed-title" rows="1" placeholder="Что сделать?">' + esc(E.title) + '</textarea>' +
 
       '<div class="field"><div class="label">Проект</div><div class="chips scroll" data-group="project">' + projChips + '</div></div>' +
@@ -744,7 +898,7 @@
       '</div></div>' +
 
       '<div class="field"><div class="label">Подзадачи</div><div class="subs"></div>' +
-      '<input class="input sub-add" placeholder="+ Добавить подзадачу" enterkeyhint="done"></div>' +
+      '<input class="input sub-add" placeholder="Добавить подзадачу" enterkeyhint="done"></div>' +
 
       '<div class="field"><div class="label">Заметка</div>' +
       '<textarea class="input note" data-f="note" rows="3" placeholder="Детали, ссылки, контакты">' + esc(E.note) + '</textarea>' +
@@ -793,13 +947,13 @@
         '<div class="sub" data-sid="' + esc(s.id) + '">' +
         '<button class="sub-check' + (s.done ? ' on' : '') + '" data-sub="toggle" aria-label="Готово"></button>' +
         '<input class="sub-text" data-sub="text" value="' + esc(s.t) + '">' +
-        '<button class="sub-del" data-sub="del" aria-label="Удалить">×</button></div>').join('');
+        '<button class="sub-del" data-sub="del" aria-label="Удалить подзадачу">' + ic('x', '') + '</button></div>').join('');
     }
 
     function paintLinks() {
       const links = extractLinks(E.note);
       el.querySelector('.links').innerHTML = links.map(u =>
-        '<button class="link-btn" data-url="' + esc(u) + '">↗ ' + esc(u.replace(/^https?:\/\//, '').slice(0, 48)) + '</button>').join('');
+        '<button class="link-btn" data-url="' + esc(u) + '">' + ic('ext', '') + esc(u.replace(/^https?:\/\//, '').slice(0, 48)) + '</button>').join('');
     }
 
     function finalTask() {
@@ -829,7 +983,7 @@
       const next = nextId && S.tasks.find(t => t.id === nextId && t.status === 'inbox');
       if (next) openEditor(next, { triage: true });
       else if (nextId) nextInTriage();
-      else { S.triage = null; toast('Инбокс разобран 🎉'); }
+      else { S.triage = null; SND.play('fanfare', 0.3); toast('Инбокс разобран'); }
     }
 
     // --- события
@@ -1009,17 +1163,20 @@
           '<div class="proj-row" data-pid="' + esc(p.id) + '">' +
           '<button class="swatch" style="--c:' + esc(p.color) + '" data-st="palette" aria-label="Цвет"></button>' +
           '<input class="proj-name" data-st="name" value="' + esc(p.name) + '">' +
-          '<button class="icon-btn small" data-st="up"' + (i === 0 ? ' disabled' : '') + ' aria-label="Выше">↑</button>' +
-          '<button class="icon-btn small" data-st="archive" aria-label="В архив">⤓</button></div>' +
+          '<button class="icon-btn small" data-st="up"' + (i === 0 ? ' disabled' : '') + ' aria-label="Выше">' + ic('up', '') + '</button>' +
+          '<button class="icon-btn small" data-st="archive" aria-label="В архив">' + ic('archive', '') + '</button></div>' +
           (openPalette === p.id ? '<div class="palette">' + PALETTE.map(c =>
             '<button class="swatch' + (c === p.color ? ' on' : '') + '" style="--c:' + c + '" data-color="' + c + '" data-for="' + esc(p.id) + '"></button>').join('') + '</div>' : '')
         ).join('') + '</div>' +
-        '<button class="btn wide" data-st="add">+ Новый проект</button>' +
+        '<button class="btn wide" data-st="add">' + ic('plus', '') + 'Новый проект</button>' +
         (arch.length ? '<button class="link-like" data-st="toggle-arch">' + (showArchived ? 'Скрыть' : 'Показать') + ' архив (' + arch.length + ')</button>' : '') +
         (showArchived ? '<div class="card proj-list">' + arch.map(p =>
           '<div class="proj-row archived" data-pid="' + esc(p.id) + '"><i class="swatch static" style="--c:' + esc(p.color) + '"></i>' +
           '<span class="proj-name">' + esc(p.name) + '</span><button class="btn small" data-st="unarchive">Вернуть</button></div>').join('') + '</div>' : '') +
         '<p class="hint">Архивные проекты не предлагаются для новых задач, но старые задачи и статистика остаются.</p>' +
+        '<div class="sheet-title">Звуки</div>' +
+        '<label class="switch-row">Тихие звуки действий<input type="checkbox" data-st="sound"' + (SND.on ? ' checked' : '') + '></label>' +
+        '<p class="hint">Щелчок при выборе, мягкий сигнал при выполнении, аккорд, когда день закрыт. Настройка хранится на этом устройстве.</p>' +
         '<div class="sheet-title">Как добавлять задачи</div>' +
         '<p class="hint">Пиши боту или пересылай ему любые сообщения — всё падает в инбокс. ' +
         'Начни с названия проекта и двоеточия, чтобы сразу его проставить: <b>RVO: сделать ссылку кликабельной</b>. ' +
@@ -1095,6 +1252,11 @@
       }
     });
     box.addEventListener('change', e => {
+      if (e.target.dataset.st === 'sound') {
+        SND.set(e.target.checked);
+        if (SND.on) SND.play('success');
+        return;
+      }
       if (e.target.dataset.st !== 'name') return;
       const p = proj(e.target.closest('[data-pid]').dataset.pid);
       const name = e.target.value.trim();
@@ -1115,7 +1277,7 @@
     el.classList.remove('show');
     void el.offsetWidth;
     el.classList.add('show');
-    if (action) el.querySelector('button').onclick = () => { action.fn(); hideToast(); };
+    if (action) el.querySelector('button').onclick = () => { SND.play('undo'); action.fn(); hideToast(); };
     clearTimeout(toastTimer);
     toastTimer = setTimeout(hideToast, action ? 5000 : 2200);
   }
@@ -1236,15 +1398,33 @@
     return TITLES[t] ? t : 'today';
   }
 
+  // Светлая/тёмная тема: в Telegram — по его схеме, в браузере — по системе (или ?theme=dark)
+  const darkQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+  function applyTheme() {
+    const forced = new URLSearchParams(location.search).get('theme');
+    const dark = forced ? forced === 'dark'
+      : IN_TG && tg.colorScheme ? tg.colorScheme === 'dark'
+        : !!(darkQuery && darkQuery.matches);
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+    if (tg && IN_TG) {
+      const bg = dark ? '#0E0E10' : '#F4F4F1';
+      try {
+        if (tg.setHeaderColor) tg.setHeaderColor(bg);
+        if (tg.setBackgroundColor) tg.setBackgroundColor(bg);
+        if (tg.setBottomBarColor) tg.setBottomBarColor(bg);
+      } catch (e) { /* старые клиенты */ }
+    }
+  }
+
   function init() {
+    applyTheme();
+    if (darkQuery && darkQuery.addEventListener) darkQuery.addEventListener('change', applyTheme);
     if (tg) {
       try {
         tg.ready();
         tg.expand();
         if (tg.disableVerticalSwipes) tg.disableVerticalSwipes();
-        if (tg.setHeaderColor) tg.setHeaderColor('secondary_bg_color');
-        if (tg.setBackgroundColor) tg.setBackgroundColor('secondary_bg_color');
-        if (tg.setBottomBarColor) tg.setBottomBarColor('secondary_bg_color');
+        if (tg.onEvent) tg.onEvent('themeChanged', applyTheme);
         tg.BackButton.onClick(() => closeSheet());
       } catch (e) { /* старые клиенты */ }
     }
